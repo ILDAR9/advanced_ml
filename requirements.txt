@@ -1,0 +1,15 @@
+numpy==1.19.2
+pyyaml==5.4.1
+scipy==1.6.1
+flask==1.1.2
+nltk==3.5
+pandas==1.2.3 
+torch==1.7.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+torchvision==0.8.2
+scikit-learn==0.23.2
+catboost==0.23
+scrapy==2.4.1
+faiss-cpu==1.7.0
+langdetect==1.0.8
+tqdm
+hyperopt
