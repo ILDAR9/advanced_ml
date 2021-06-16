@@ -1,29 +1,22 @@
 # -*- coding: utf-8 -*-
-"""
-1. Реализация токенизации и препроцессинга данных.
-2. Создание матрицы эмбеддингов и словаря токенов.
-3. Имплементация Kernels и модели KNRM
-4. Подготовка Datasets и Dataloaders для обучения и валидации модели.
-5. Тренировка модели.
-"""
+import json
+import math
+import os
 import string
 from collections import Counter
-from typing import Dict, List, Tuple, Union, Callable
+from typing import Callable, Dict, List, Tuple, Union
 
 import nltk
 import numpy as np
-import math
 import pandas as pd
 import torch
 import torch.nn.functional as F
 
+from tqdm.auto import tqdm
 
-glue_qqp_dir = '/home/nur/projects/analysis/range_matching/data/QQP'
-glove_path = '/home/nur/projects/analysis/range_matching/data/glove.6B.50d.txt'
-
-########
-# Блок 3
-########
+STORE_FLD = "/home/nur/projects/analysis/range_matching/data"
+glue_qqp_dir = os.path.join(STORE_FLD, 'QQP')
+glove_path = os.path.join(STORE_FLD, 'glove.6B.50d.txt')
 
 
 class GaussianKernel(torch.nn.Module):
@@ -40,7 +33,7 @@ class GaussianKernel(torch.nn.Module):
         """
         Простой нелинейный оператор
         """
-        return torch.exp(-(x-self.mu)**2 / (2 * self.sigma**2))
+        return torch.exp(-0.5 * ((x - self.mu) ** 2) / (self.sigma ** 2))
 
 
 class KNRM(torch.nn.Module):
@@ -91,15 +84,11 @@ class KNRM(torch.nn.Module):
         ps: нелинейность не применяется в конце MLP. Таким образом, с помощью цикла нужно
         научиться в автоматическом режиме генерировать архитектуру выходного слоя.
         """
-        if not self.out_layers:
-            output = [torch.nn.Linear(self.kernel_num, 1)]
-        else:
-            layer_sizes = self.out_layers + [1]
-            output = [torch.nn.Linear(self.kernel_num, layer_sizes[0])]
-            for current, previous in zip(layer_sizes[:-1], layer_sizes[1:]):
-                output += [torch.nn.ReLU(), torch.nn.Linear(current, previous)]
-
-        return torch.nn.Sequential(*output)
+        out_cont = [self.kernel_num] + self.out_layers + [1]
+        mlp = []
+        for in_f, out_f in zip(out_cont, out_cont[1:]):
+            mlp += [torch.nn.Linear(in_f, out_f), torch.nn.ReLU()]
+        return torch.nn.Sequential(*mlp[:-1])
 
     def forward(self, input_1: Dict[str, torch.Tensor], input_2: Dict[str, torch.Tensor]) -> torch.FloatTensor:
         logits_1 = self.predict(input_1)
@@ -116,21 +105,18 @@ class KNRM(torch.nn.Module):
         вопроса (запрос и документ). В качестве меры используется косинусная схожесть
         (cosine similarity) между эмбеддингами отдельных токенов.
         """
-        batch_size = query.shape[0]
-        cosines = []
-        
-        query = self.embeddings(query)
-        doc = self.embeddings(doc)
+        # shape = [B, L, D]
+        embed_query = self.embeddings(query.long())
+        # shape = [B, R, D]
+        embed_doc = self.embeddings(doc.long())
 
-        cosines = []
-
-        for i in range(batch_size):
-            for qi in range(query.shape[1]):
-                cosine = self.cos(query[i, qi], doc[i])
-                cosines.append(cosine)
-        # [Batch, Left, Right]
-        cosines = torch.vstack(cosines).reshape(batch_size, query.shape[1], doc.shape[1])
-        return cosines
+        # shape = [B, L, R]
+        matching_matrix = torch.einsum(
+            'bld,brd->blr',
+            F.normalize(embed_query, p=2, dim=-1),
+            F.normalize(embed_doc, p=2, dim=-1)
+        )
+        return matching_matrix
 
     def _apply_kernels(self, matching_matrix: torch.FloatTensor) -> torch.FloatTensor:
         """
@@ -157,10 +143,6 @@ class KNRM(torch.nn.Module):
         out = self.mlp(kernels_out)
         return out
 
-########
-# Блок 4
-########
-
 
 class RankingDataset(torch.utils.data.Dataset):
     """
@@ -177,16 +159,11 @@ class RankingDataset(torch.utils.data.Dataset):
                  preproc_func: Callable, max_len: int = 30):
         """
         index_pairs_or_triplets - список списков id (и, конечно, лейблов).
-
         idx_to_text_mapping - соотнесение индекса (id_left и id_right) с текстом,
           подробнее в методе get_idx_to_text_mapping класса Solution.
-
         vocab - маппинг слова в индекс которые подаются в эмбеддинг-слой KNRM.
-
         oov_val - значение (индекс)  в словаре на случай, если слово не представлено в словаре.
-
         preproc_func - функция обработки и токенизации текста.
-
         max_len - максимальное количество токенов в тексте.
         """
         self.index_pairs_or_triplets = index_pairs_or_triplets
@@ -200,9 +177,6 @@ class RankingDataset(torch.utils.data.Dataset):
         return len(self.index_pairs_or_triplets)
 
     def _tokenized_text_to_index(self, tokenized_text: List[str]) -> List[int]:
-        """
-        Перевод обработанного текста после preproc_func в индексы.
-        """
         return [self.vocab.get(t, 1) for t in tokenized_text[:self.max_len]]
 
     def _convert_text_idx_to_token_idxs(self, idx: int) -> List[int]:
@@ -318,10 +292,6 @@ def collate_fn(batch_objs: List[Union[Dict[str, torch.Tensor], torch.FloatTensor
     else:
         return ret_left, labels
 
-############
-# Блок 1,2,5
-############
-
 
 class Solution:
     def __init__(self, glue_qqp_dir: str, glove_vectors_path: str,
@@ -360,8 +330,8 @@ class Solution:
         self.glue_dev_df = self.get_glue_df('dev')
         self.dev_pairs_for_ndcg = self.create_val_pairs(self.glue_dev_df)
         self.min_token_occurancies = min_token_occurancies
-        self.all_tokens = self.get_all_tokens([self.glue_train_df, self.glue_dev_df], self.min_token_occurancies)
-
+        self.all_tokens = self.get_all_tokens([self.glue_train_df, self.glue_dev_df],
+                                              self.min_token_occurancies)
         self.random_seed = random_seed
         self.emb_rand_uni_bound = emb_rand_uni_bound
         self.freeze_knrm_embeddings = freeze_knrm_embeddings
@@ -398,30 +368,13 @@ class Solution:
         })
         return glue_df_fin
 
-    ########
-    # Блок 1
-    ########
-
     def hadle_punctuation(self, inp_str: str) -> str:
-        """
-        Очищает строку от пунктуации. Все знаки пунктуации необходимо взять из string.punctuation.
-        Подумайте, какая именно необходима замена знакам пунктуации.
-        """
         return inp_str.translate(self.trans)
 
     def simple_preproc(self, inp_str: str) -> List[str]:
-        """
-        Полный препроцессинг строки. Должно включать в себя обработку пунктуации и приведение
-        к нижнему регистру, а в качестве токенизации используется nltk.word_tokenize.
-
-        Returns: лист со строками (токенами)
-        """
         return nltk.word_tokenize(self.hadle_punctuation(inp_str).lower())
 
     def _filter_rare_words(self, vocab: Dict[str, int], min_occurancies: int) -> Dict[str, int]:
-        """
-        Отсечь те, которые не проходят порог, равный min_token_occurancies
-        """
         return [k for k, v in vocab.items() if v >= min_occurancies]
 
     def gen_unique_text(self, dflist):
@@ -440,15 +393,8 @@ class Solution:
     def get_all_tokens(self, list_of_df: List[pd.DataFrame], min_occurancies: int) -> List[str]:
         """
         Метод формирующий список ВСЕХ токенов, представленных в подаваемых на вход датасетах.
-        Необходимо сформировать уникальное множество всех текстов, затем рассчитать частотность
-        каждого токена (то есть после обработки simple_preproc) и отсечь те, которые не проходят
-        порог, равный min_token_occurancies.
-
-        Returns: список токенов, для которых будут формироваться эмбеддинги и на которые будут
-        разбиваться оригинальные тексты вопросов.
         """
-        fpath = "/home/nur/projects/analysis/range_matching/data/token_list.txt"
-        import os  # ToDo delete
+        fpath = os.path.join(STORE_FLD, "token_list.txt")
         if os.path.exists(fpath):
             with open(fpath, 'r') as f:
                 return [row.strip() for row in f if row]
@@ -457,19 +403,13 @@ class Solution:
         counter = Counter(gen_token)
         res = self._filter_rare_words(counter, min_occurancies)
 
-        # with open(fpath, 'w') as f:
-        #     for t in res:
-        #         f.write(t+'\n')
+        with open(fpath, 'w') as f:
+            for t in res:
+                f.write(t+'\n')
+
         return res
 
-    #######
-    # Блок2
-    #######
-
     def _read_glove_embeddings(self, file_path: str) -> Dict[str, List[str]]:
-        """
-        Считывание файла эмбеддингов в словарь
-        """
         with open(file_path, 'r') as f:
             return dict((row.strip().split(' ', 1) for row in f))
 
@@ -479,37 +419,25 @@ class Solution:
         """
         Метод формирует (1) матрицу эмбеддингов размера N∗D, (2) словарь размера N,
         сопоставляющий каждому слову индекс эмбеддинга, (3) список слов, которые не были в
-        исходных эмбеддингах (генерировать случайный эмбеддинг из равномерного распределения
-        или другой вектор с заданными характеристиками).
-        ps: необходимо в словарь добавить два специальных токена - PAD и OOV, с индексами 0 и 1.
-        'PAD' используется для заполнения пустот в тензорах (когда один вопрос состоит из
-        бОльшего количества токенов, чем второй, однако их необходимо представить в виде матрицы,
-        в которой строки имеют одинаковую длину) и должен состоять полностью из нулей.
-        'OOV' для токенов, которых нет в словаре.
-
-        Returns: На выходе в матрице эмбеддингов (и в словаре) должны быть как загруженные из
-        файла вектора (для тех слов, которые в нем встретились), так и для новых слов (из unk_words,
-        включая PAD и OOV).
-        ex: для min_token_occurancies=1 доля unk_words из всех слов должна быть около 30%.
+        исходных эмбеддингах (генерировать случайный эмбеддинг).
         """
         d = self._read_glove_embeddings(file_path)
-        embs = [np.zeros(50, dtype=np.float32), np.random.uniform(size=50)]
-        vocab = {'PAD': 0, 'OOV': 1}
-        unk_words = ['PAD', 'OOV']
-        for i, t in enumerate(inner_keys, start=2):
+        dim = 50
+        inner_keys = ['PAD', 'OOV'] + inner_keys
+        embs = []
+        unk_words = []
+        vocab = dict()
+        for i, t in enumerate(inner_keys, start=0):
             if t not in d:
                 unk_words.append(t)
-                emb = np.random.uniform(size=50)
+                emb = np.random.uniform(-rand_uni_bound, rand_uni_bound, size=dim)
             else:
                 emb = np.array(list(map(float, d[t].split())), dtype=np.float32)
             embs.append(emb)
             vocab[t] = i
+        embs[0] = np.zeros(dim, dtype=np.float32)
         matrix = np.asarray(embs, dtype=np.float32)
         return matrix, vocab, unk_words
-
-    ########
-    # Блок 4
-    ########
 
     def build_knrm_model(self) -> Tuple[torch.nn.Module, Dict[str, int], List[str]]:
         emb_matrix, vocab, unk_words = self.create_glove_emb_from_file(
@@ -573,10 +501,6 @@ class Solution:
         )
         left_dict.update(right_dict)
         return left_dict
-
-    ########
-    # Блок 5
-    ########
 
     def _compute_gain(self, ys_value: float, gain_scheme: str = 'exp2') -> float:
         if gain_scheme == "const":
@@ -661,31 +585,18 @@ class Solution:
 
     def train(self, n_epochs: int):
         """
-        Обучаться в PairWise-режиме
-
-        N итераций по тренировочному Dataloader. В зависимости от метода формирования тренировочной
-        выборки, по необходимости пересоздавайте выборку каждые change_train_loader_ep эпох.
-        Реализовать методику подбора триплетов документов для обучения в PairWise-режиме нейросети KNRM.
-        ex: создание валидационного пулла в качестве примера.
-        ex2: генерировать порядка 8-10 тысяч триплетов для обучения.
-        Это недетерминированынй процесс и потому появляется возможность каждые 'K' эпох менять выборку
-        (не меняя смысла задачи - всё еще нужно определять, релевантнее ли второй документ, чем первый,
-        к данному запросу), например - менять left и right id.
+        Пересоздает выборку каждые change_train_loader_ep эпох.
         """
-        from tqdm.auto import tqdm
         opt = torch.optim.SGD(self.model.parameters(), lr=self.train_lr)
         criterion = torch.nn.BCELoss()
 
-        # with torch.no_grad():
-        #     val_metric = self.valid(self.model, self.val_dataloader)
-        #     print("Val metric (0) =", val_metric)
-
-        self.model.train()
+        ndcgs = []
         for epoch in tqdm(range(n_epochs), total=n_epochs):
+            self.model.train()
             if epoch % self.change_train_loader_ep == 0:
-                start_i = epoch // self.change_train_loader_ep
                 count = 20000
-                train_triplets = self.sample_data_for_train_iter(self.glue_train_df.iloc[start_i*count: (start_i+1) *count], seed=epoch)
+                start_i = (epoch // self.change_train_loader_ep) % (self.glue_train_df.shape[0] // count - 1)
+                train_triplets = self.sample_data_for_train_iter(self.glue_train_df.iloc[start_i*count: (start_i+1) * count], seed=epoch)
 
                 train_dataset = TrainTripletsDataset(train_triplets,
                                                      self.idx_to_text_mapping_train,
@@ -695,8 +606,7 @@ class Solution:
                     train_dataset, batch_size=self.dataloader_bs, num_workers=0,
                     collate_fn=collate_fn, shuffle=False)
 
-            for i, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader)):
-                opt.zero_grad()
+            for batch in train_dataloader:
 
                 d1, d2, batch_target = batch
                 batch_pred = self.model(d1, d2)
@@ -708,6 +618,10 @@ class Solution:
                 self.model.eval()
                 val_metric = self.valid(self.model, self.val_dataloader)
                 print(f"Val metric ({epoch}) = {val_metric}")
+                ndcgs.append(val_metric)
+                # if val_metric > 0.93:
+                #     break
+        return ndcgs
 
 
 if __name__ == "__main__":
@@ -716,6 +630,15 @@ if __name__ == "__main__":
     8-12 итерация по датасету размера 8-10 тысяч с batch_size 1024.
     Модель при отправке тренируется с нуля до 20 эпох не более 7 минут.
     """
-    s = Solution(glue_qqp_dir, glove_path)
-    s.train(n_epochs=20)
-    print(f"Trained model NDCG={metric}")
+    sol = Solution(glue_qqp_dir, glove_path,   change_train_loader_ep=4)
+    ndcg_train_list = sol.train(n_epochs=30)
+    print(f"Trained model NDCG={ndcg_train_list}")
+
+    state_mlp = sol.model.mlp.state_dict()
+    torch.save(state_mlp, open(os.path.join(STORE_FLD, 'knrm_mlp.bin'), 'wb'))
+
+    state_emb = sol.model.embeddings.state_dict()
+    torch.save(state_emb, open(os.path.join(STORE_FLD, 'knrm_emb.bin'), 'wb'))
+
+    state_vocab = sol.vocab
+    json.dump(state_vocab, open(os.path.join(STORE_FLD, 'vocab.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=4)
