@@ -1,0 +1,56 @@
+stages:
+    - .pre
+    - build
+    - deploy
+
+variables:
+    REGISTRY: 95.216.168.158:4444
+
+get_secret:
+    stage: .pre
+    image: python:3.9
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    services:
+        - name: waryak/karpov_courses:secret_ci_service
+          alias: waryak
+    script:
+        - python3 get_secret_number.py $CI_COMMIT_REF_SLUG > ./secret.txt
+    artifacts:
+        paths:
+        - ./secret.txt
+
+build:
+    stage: build
+    image: kroniak/ssh-client
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    variables:
+        TAG: web_app_6_1:${CI_COMMIT_REF_SLUG}
+    before_script:
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+        - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        - chmod 600 ~/.ssh/id_rsa
+        - export SECRET_NUMBER=$(cat ./secret.txt)
+    script:
+        - ssh root@95.216.168.89 "cd /root/6/6.1 && docker build -t ${REGISTRY}/${TAG} --build-arg SECRET_NUMBER_ARG=$SECRET_NUMBER ."
+        - ssh root@95.216.168.89 "docker push ${REGISTRY}/${TAG}"
+
+deploy:
+    stage: deploy
+    image: kroniak/ssh-client
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    variables:
+        SWARM_SERVICE_NAME: web_app_${CI_COMMIT_REF_SLUG}
+        TAG: web_app_6_1:${CI_COMMIT_REF_SLUG}
+    before_script:
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+        - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        - chmod 600 ~/.ssh/id_rsa
+    script:
+        - ssh root@95.216.168.89 "docker service update --image ${REGISTRY}/${TAG} --replicas 2 ${SWARM_SERVICE_NAME} --force"

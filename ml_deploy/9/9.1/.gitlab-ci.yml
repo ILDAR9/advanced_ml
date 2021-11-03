@@ -1,0 +1,33 @@
+stages:
+    - build 
+    - deploy
+
+build:
+    stage: build
+    image: python:3.9
+    services:
+    - name: waryak/karpov_courses:secret_ci_service
+      alias: waryak
+    variables:
+        MLFLOW_S3_ENDPOINT_URL: "http://95.216.168.89:19001"
+        MLFLOW_TRACKING_URI: "http://95.216.168.89:5000"
+        AWS_ACCESS_KEY_ID: "IAM_ACCESS_KEY"
+        AWS_SECRET_ACCESS_KEY: "IAM_SECRET_KEY"
+    before_script:
+        - pip3 install mlflow boto3 requests scikit-learn
+    script:
+        - python3 wrap_model.py
+
+deploy:
+    stage: deploy
+    image: kroniak/ssh-client
+    variables:
+        SSH_PRIVATE_KEY: $SSH_PRIVATE_KEY
+    before_script:
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+        - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        - chmod 600 ~/.ssh/id_rsa
+    script:
+        - ssh root@95.216.168.89 "docker service update --image 95.216.168.158:4444/web_app_9_1:2 web_app_9 --force"

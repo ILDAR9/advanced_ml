@@ -1,0 +1,54 @@
+stages:
+    - .pre
+    - build
+    - deploy
+
+get_secret:
+    stage: .pre
+    image: python:3.9
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    services:
+        - name: waryak/karpov_courses:secret_ci_service
+          alias: waryak
+    script:
+        - python3 get_secret_number.py $CI_COMMIT_REF_SLUG > ./secret.txt
+    artifacts:
+        paths:
+        - ./secret.txt
+
+build:
+    stage: build
+    image: docker:git
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    services:
+        - name: docker:dind
+          command: ['--tls=false', '--host=tcp://0.0.0.0:2375', '--insecure-registry=95.216.168.158:4444']
+    before_script:
+        - docker info
+        - export SECRET_NUMBER=$(cat ./secret.txt)
+    variables:
+        DOCKER_DRIVER: overlay2
+        DOCKER_HOST: tcp://localhost:2375
+        DOCKER_TLS_CERTDIR: "/certs"
+    script:
+        - docker build -t 95.216.168.158:4444/web_app_6_1:${CI_COMMIT_REF_SLUG} --build-arg SECRET_NUMBER_ARG=$SECRET_NUMBER .
+        - docker push 95.216.168.158:4444/web_app_6_1:${CI_COMMIT_REF_SLUG}
+
+deploy:
+    stage: deploy
+    image: kroniak/ssh-client
+    rules:
+        - if: '$CI_COMMIT_BRANCH == "TEST" || $CI_COMMIT_BRANCH == "PROD"'
+    variables:
+        SWARM_SERVICE_NAME: web_app_6_1_${CI_COMMIT_REF_SLUG}
+    before_script:
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+        - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        - chmod 600 ~/.ssh/id_rsa
+    script:
+        - ssh root@95.216.168.89 "docker service create --name ${SWARM_SERVICE_NAME} 95.216.168.158:4444/web_app_6_1:${CI_COMMIT_REF_SLUG}"
+        - ssh root@95.216.168.89 "docker service update --image 95.216.168.158:4444/web_app_6_1:${CI_COMMIT_REF_SLUG} --replicas 2 ${SWARM_SERVICE_NAME} --force"
