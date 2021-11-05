@@ -1,0 +1,11 @@
+pandas
+numpy
+matplotlib
+seaborn
+tqdm
+scikit-learn
+wheel
+pystan==2.19.1.1
+ephem==3.7.7.1
+prophet==1.0.1
+plotly

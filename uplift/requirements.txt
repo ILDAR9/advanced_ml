@@ -1,3 +1,9 @@
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+tqdm
 dask
 causalml
 catboost
