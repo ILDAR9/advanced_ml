@@ -1,0 +1,1 @@
+[{"name": "receipts_basic", "args": {"delta": 60}}, {"name": "receipts_basic", "args": {"delta": 15}}, {"name": "age_gender", "args": {}}, {"name": "unique_categories", "args": {"col_category": "level_3", "delta": 60}}]

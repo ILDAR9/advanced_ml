@@ -1,0 +1,50 @@
+{
+    "random_state": 165,
+    "extract": "n1_serving_extract_config.json",
+    "transform": [
+        {
+            "type": "pipeline_pickle",
+            "path": "n1_serving_transform_pipeline.pickle"
+        },
+        {
+            "type": "model_apply",
+            "model_path": "n1_exp300_model.pickle",
+            "col_result": "n1_upmodel_exp300__score"
+        },
+        {
+            "type": "binning",
+            "args": {
+                "col_value": "n1_upmodel_exp300__score",
+                "col_result": "n1_treatment",
+                "bins": [-0.17],
+                "labels": ["no_offer", "exp300"]
+            }
+        }
+    ],
+    "groups": [
+        {
+            "name": "control",
+            "size": 30000,
+            "treatment_params": {
+                "type": "constant",
+                "treatment": "no_offer"
+            }
+        },
+        {
+            "name": "always_exp300",
+            "size": 30000,
+            "treatment_params": {
+                "type": "constant",
+                "treatment": "exp300"
+            }
+        },
+        {
+            "name": "selected_exp300",
+            "size": 200000,
+            "treatment_params": {
+                "type": "from_column",
+                "col_treatment": "n1_treatment"
+            }
+        }
+    ]
+}

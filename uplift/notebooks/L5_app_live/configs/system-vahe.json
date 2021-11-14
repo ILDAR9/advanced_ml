@@ -1,0 +1,7 @@
+{
+    "database": {
+        "root_path": "/Users/vavbrs/Documents/karpov/lessons/L4_feature_store/data/light/"
+    },
+    "runs_root_path": "/Users/vavbrs/Documents/karpov/lessons/L5_app_live/runs",
+    "artifacts_root_path": "/Users/vavbrs/Documents/karpov/lessons/L5_app_live/artifacts"
+}
